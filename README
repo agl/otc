@@ -1,0 +1,21 @@
+OpenType Condom
+---------------
+
+(Idea and name from Alex Russell)
+
+The CSS font-face property[1] is great for web typography. Having to use images
+in order to get the correct typeface is a great sadness; one should be able to
+use vectors.
+
+However, the TrueType renderers on many platforms have never been part of the
+attack surface before and putting them on the front line is a scary proposition.
+Esp on platforms like Windows where it's a closed-source blob running with high
+privilege.
+
+Thus, the OpenType Condom (OTC) is designed to parse and serialise OpenType
+files, validating them and sanitising them as it goes. Most significantly, it
+removes hinting bytes from the files as it processes.
+
+This is just an initial release. Do not use it in anger yet.
+
+[1] http://www.w3.org/TR/CSS2/fonts.html#font-descriptions
