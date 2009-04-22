@@ -10,7 +10,7 @@ class FILEStream : public OTCStream {
   ~FILEStream() {
   }
 
-  bool Write(const void *data, size_t length) {
+  bool WriteRaw(const void *data, size_t length) {
     return fwrite(data, length, 1, file_) == 1;
   }
 

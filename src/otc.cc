@@ -42,12 +42,19 @@ struct OutputTable {
   uint32_t tag;
   size_t offset;
   size_t length;
+  uint32_t chksum;
 
   static bool SortByTag(const OutputTable& a, const OutputTable& b) {
     const uint32_t atag = ntohl(a.tag);
     const uint32_t btag = ntohl(b.tag);
     return atag < btag;
   }
+};
+
+struct BypassTable {
+  uint32_t tag;
+  size_t offset;  // offset into input data
+  size_t length;
 };
 
 bool
@@ -151,23 +158,27 @@ otc_process(OTCStream *output, const uint8_t *data, size_t length) {
     bool (*should_serialise) (OpenTypeFile *file);
     void (*free) (OpenTypeFile *file);
     bool required;
+    bool bypass;
   } table_parsers[] = {
-    { tag("maxp"), otc_maxp_parse, otc_maxp_serialise, otc_maxp_should_serialise, otc_maxp_free, 1 },
-    { tag("cmap"), otc_cmap_parse, otc_cmap_serialise, otc_cmap_should_serialise, otc_cmap_free, 1 },
-    { tag("head"), otc_head_parse, otc_head_serialise, otc_head_should_serialise, otc_head_free, 1 },
-    { tag("hhea"), otc_hhea_parse, otc_hhea_serialise, otc_hhea_should_serialise, otc_hhea_free, 1 },
-    { tag("hmtx"), otc_hmtx_parse, otc_hmtx_serialise, otc_hmtx_should_serialise, otc_hmtx_free, 1 },
-    { tag("name"), otc_name_parse, otc_name_serialise, otc_name_should_serialise, otc_name_free, 1 },
-    { tag("OS/2"), otc_os2_parse, otc_os2_serialise, otc_os2_should_serialise, otc_os2_free, 1 },
-    { tag("post"), otc_post_parse, otc_post_serialise, otc_post_should_serialise, otc_post_free, 1 },
-    { tag("loca"), otc_loca_parse, otc_loca_serialise, otc_loca_should_serialise, otc_loca_free, 1 },
-    { tag("glyf"), otc_glyf_parse, otc_glyf_serialise, otc_glyf_should_serialise, otc_glyf_free, 1 },
+    { tag("maxp"), otc_maxp_parse, otc_maxp_serialise, otc_maxp_should_serialise, otc_maxp_free, 1, 0 },
+    { tag("cmap"), otc_cmap_parse, otc_cmap_serialise, otc_cmap_should_serialise, otc_cmap_free, 1, 0 },
+    { tag("head"), otc_head_parse, otc_head_serialise, otc_head_should_serialise, otc_head_free, 1, 0 },
+    { tag("hhea"), otc_hhea_parse, otc_hhea_serialise, otc_hhea_should_serialise, otc_hhea_free, 1, 0 },
+    { tag("hmtx"), otc_hmtx_parse, otc_hmtx_serialise, otc_hmtx_should_serialise, otc_hmtx_free, 1, 0 },
+    { tag("name"), otc_name_parse, otc_name_serialise, otc_name_should_serialise, otc_name_free, 1, 0 },
+    { tag("OS/2"), otc_os2_parse, otc_os2_serialise, otc_os2_should_serialise, otc_os2_free, 1, 0 },
+    { tag("post"), otc_post_parse, otc_post_serialise, otc_post_should_serialise, otc_post_free, 1, 0 },
+    { tag("loca"), otc_loca_parse, otc_loca_serialise, otc_loca_should_serialise, otc_loca_free, 1, 0 },
+    { tag("glyf"), otc_glyf_parse, otc_glyf_serialise, otc_glyf_should_serialise, otc_glyf_free, 1, 0 },
     { 0, NULL, NULL, NULL, 0 },
   };
+
+  std::vector<BypassTable> bypass_tables;
 
   for (unsigned i = 0; ; ++i) {
     if (table_parsers[i].parse == NULL)
       break;
+
     const std::map<uint32_t, OpenTypeTable>::const_iterator
       it = table_map.find(table_parsers[i].tag);
 
@@ -175,6 +186,14 @@ otc_process(OTCStream *output, const uint8_t *data, size_t length) {
       if (table_parsers[i].required)
         return failure();
       continue;
+    }
+
+    if (table_parsers[i].bypass) {
+      BypassTable bypass;
+      bypass.offset = it->second.offset;
+      bypass.length = it->second.length;
+      bypass.tag = table_parsers[i].tag;
+      bypass_tables.push_back(bypass);
     }
 
     if (!table_parsers[i].parse(&header, data + it->second.offset, it->second.length))
@@ -186,15 +205,21 @@ otc_process(OTCStream *output, const uint8_t *data, size_t length) {
     if (table_parsers[i].parse == NULL)
       break;
 
+    if (table_parsers[i].bypass)
+      continue;
+
     if (table_parsers[i].should_serialise(&header))
       num_output_tables++;
   }
+
+  num_output_tables += bypass_tables.size();
 
   max_pow2 = 0;
   while (1u << (max_pow2 + 1) < num_output_tables)
     max_pow2++;
   const uint16_t output_search_range = (1 << max_pow2) << 4;
 
+  output->ResetChecksum();
   if (!output->WriteU32(0x00010000) ||
       !output->WriteU16(num_output_tables) ||
       !output->WriteU16(output_search_range) ||
@@ -202,15 +227,41 @@ otc_process(OTCStream *output, const uint8_t *data, size_t length) {
       !output->WriteU16((num_output_tables << 4) - output_search_range)) {
     return failure();
   }
+  const uint32_t offset_table_chksum = output->chksum();
 
   const size_t table_record_offset = output->Tell();
   output->Pad(16 * num_output_tables);
 
   std::vector<OutputTable> out_tables;
 
+  size_t head_table_offset = 0;
+  for (unsigned i = 0; i < bypass_tables.size(); ++i) {
+    const BypassTable &bypass = bypass_tables[i];
+
+    OutputTable out;
+    out.tag = bypass.tag;
+    out.offset = output->Tell();
+
+    output->ResetChecksum();
+    if (bypass.tag == tag("head"))
+      head_table_offset = out.offset;
+    if (!output->Write(data + bypass.offset, bypass.length))
+      return failure();
+    const size_t end_offset = output->Tell();
+    out.length = end_offset - out.offset;
+
+    // align tables to four bytes
+    output->Pad((4 - (end_offset & 3)) % 4);
+    out.chksum = output->chksum();
+    out_tables.push_back(out);
+  }
+
   for (unsigned i = 0; ; ++i) {
     if (table_parsers[i].parse == NULL)
       break;
+
+    if (table_parsers[i].bypass)
+      continue;
 
     if (!table_parsers[i].should_serialise(&header))
       continue;
@@ -219,15 +270,19 @@ otc_process(OTCStream *output, const uint8_t *data, size_t length) {
     out.tag = table_parsers[i].tag;
     out.offset = output->Tell();
 
+    output->ResetChecksum();
+    if (table_parsers[i].tag == tag("head"))
+      head_table_offset = out.offset;
     if (!table_parsers[i].serialise(output, &header))
       return failure();
 
     const size_t end_offset = output->Tell();
     out.length = end_offset - out.offset;
-    out_tables.push_back(out);
 
     // align tables to four bytes
     output->Pad((4 - (end_offset & 3)) % 4);
+    out.chksum = output->chksum();
+    out_tables.push_back(out);
   }
 
   const size_t end_of_file = output->Tell();
@@ -236,14 +291,27 @@ otc_process(OTCStream *output, const uint8_t *data, size_t length) {
   std::sort(out_tables.begin(), out_tables.end(), OutputTable::SortByTag);
   output->Seek(table_record_offset);
 
+  output->ResetChecksum();
+  uint32_t tables_chksum = 0;
   for (unsigned i = 0; i < out_tables.size(); ++i) {
     if (!output->WriteTag(out_tables[i].tag) ||
-        !output->WriteU32(0) ||
+        !output->WriteU32(out_tables[i].chksum) ||
         !output->WriteU32(out_tables[i].offset) ||
         !output->WriteU32(out_tables[i].length)) {
       return failure();
     }
+    tables_chksum += out_tables[i].chksum;
   }
+  const uint32_t table_record_chksum = output->chksum();
+
+  // http://www.microsoft.com/typography/otspec/otff.htm
+  const uint32_t file_chksum = offset_table_chksum + tables_chksum + table_record_chksum;
+  const uint32_t chksum_magic = static_cast<uint32_t>(0xb1b0afba) - file_chksum;
+
+  // seek into the 'head' table and write in the checksum magic value
+  assert(head_table_offset != 0);
+  output->Seek(head_table_offset + 8);
+  output->WriteU32(chksum_magic);
 
   output->Seek(end_of_file);
 

@@ -400,7 +400,7 @@ otc_cmap_serialise(OTCStream *out, OpenTypeFile *file) {
   }
 
   const off_t record_offset = out->Tell();
-  out->Seek(record_offset + num_subtables * 8);
+  out->Pad(num_subtables * 8);
 
   const off_t offset_314 = out->Tell();
   if (have_314) {
@@ -451,6 +451,10 @@ otc_cmap_serialise(OTCStream *out, OpenTypeFile *file) {
   }
 
   const off_t table_end = out->Tell();
+  // We might have hanging bytes from the above's checksum which the OTCStream
+  // then merges into the table of offsets.
+  OTCStream::ChecksumState saved_checksum = out->SaveChecksumState();
+  out->ResetChecksum();
 
   // Now seek back and write the table of offsets
   out->Seek(record_offset);
@@ -479,6 +483,7 @@ otc_cmap_serialise(OTCStream *out, OpenTypeFile *file) {
   }
 
   out->Seek(table_end);
+  out->RestoreChecksum(saved_checksum);
   return true;
 }
 
